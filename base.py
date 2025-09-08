@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 pd.set_option("display.max_columns", None)
 
 # Adjust this path if needed
-COMPETITION_PATH = "."
+COMPETITION_PATH = ""
 
 
 def load_competition_datasets(data_dir, sample_frac=None, random_state=None):
@@ -76,11 +76,21 @@ def split_train_test(X, y, test_mask):
     Split features and labels into train/test based on mask.
     """
     print("Splitting data into train/test sets...")
-    
-    X_train = X
-    X_test = X
-    y_train = y
-    y_test = y
+
+    # Asegurar máscara booleana alineada con X
+    mask = pd.Series(test_mask, index=X.index).astype(bool)
+
+    # No usar estas columnas como features (por seguridad)
+    X = X.drop(columns=["is_test", "obs_id"], errors="ignore")
+
+    # Alinear y con X e ir a numpy para el modelo
+    y_series = y if isinstance(y, pd.Series) else pd.Series(y, index=X.index)
+
+    # Particiones
+    X_train = X.loc[~mask]
+    X_test  = X.loc[mask]
+    y_train = y_series.loc[~mask].to_numpy()
+    y_test  = None  # en test no hay labels
 
     print(f"  → Training set: {X_train.shape[0]} rows")
     print(f"  → Test set:     {X_test.shape[0]} rows")
@@ -145,13 +155,18 @@ def main():
         "obs_id",
         "target",
         "is_test",
-        "user_order"
+        "user_order",
+        #Agrege esto
+        "shuffle",
+        "offline",
+        "incognito_mode"
     ] #MODIFICAR
     df = df[to_keep]
+    obs_id_test = df.loc[df["is_test"], "obs_id"].to_numpy()
 
    # Build feature matrix and get feature names
     y = df["target"].to_numpy()
-    X = df.drop(columns=["target"])
+    X = df.drop(columns=["target", "is_test", "obs_id"])
     feature_names = X.columns
     test_mask = df["is_test"].to_numpy()
 
@@ -171,7 +186,7 @@ def main():
 
     # Predict on test set
     print("Generating predictions for test set...")
-    test_obs_ids = X_test["obs_id"]
+    test_obs_ids = obs_id_test
     preds_proba = model.predict_proba(X_test)[:, 1]
     preds_df = pd.DataFrame({"obs_id": test_obs_ids, "pred_proba": preds_proba})
     preds_df.to_csv("modelo_benchmark.csv", index=False, sep=",")
