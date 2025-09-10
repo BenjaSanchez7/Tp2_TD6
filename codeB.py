@@ -112,6 +112,39 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
     if "obs_id" in df.columns:
         df = df.sort_values("obs_id")
 
+
+#Se calcula si el artista de la cancion es igual o distinto del artista del evento anterior
+    if {"username", "master_metadata_album_artist_name"}.issubset(df.columns):
+        prev_artist = df.groupby("username", observed=True)["master_metadata_album_artist_name"].shift(1)
+        df["artist_change"] = (df["master_metadata_album_artist_name"] != prev_artist).astype(int)
+        df["artist_change"] = df["artist_change"].fillna(0).astype(int)  
+    else:
+        df["artist_change"] = 0
+
+
+
+#Calculamos el ratio historico de skips por usuario
+#!Para evitar leakage se usan solo filas del train para calcular promedios
+    if {"username", "target", "is_test"}.issubset(df.columns):
+        mask_trn = (df["is_test"] == 0) & df["target"].isin([0, 1])
+        user_skip_ratio = df.loc[mask_trn].groupby("username", observed=True)["target"].mean().astype("float32")
+        df["user_skip_ratio"] = df["username"].map(user_skip_ratio).astype("float32")
+        global_skip = float(df.loc[mask_trn, "target"].mean()) if mask_trn.any() else 0.0
+        df["user_skip_ratio"] = df["user_skip_ratio"].fillna(global_skip).astype("float32")
+    else:
+        df["user_skip_ratio"] = 0.0
+
+
+#Calculamos el ratio historico de skips por track
+    if {"spotify_track_uri", "target", "is_test"}.issubset(df.columns):
+        mask_trn = (df["is_test"] == 0) & df["target"].isin([0, 1])
+        track_skip_ratio = df.loc[mask_trn].groupby("spotify_track_uri", observed=True)["target"].mean().astype("float32")
+        df["track_skip_ratio"] = df["spotify_track_uri"].map(track_skip_ratio).astype("float32")
+        # tracks que solo aparecen en test → completar con media global de train
+        global_skip = float(df.loc[mask_trn, "target"].mean()) if mask_trn.any() else 0.0
+        df["track_skip_ratio"] = df["track_skip_ratio"].fillna(global_skip).astype("float32")
+    else:
+        df["track_skip_ratio"] = 0.0
 #Se arma una lista con las columnas utiles, el resto las ignoro y devuelvo una copia solo con las columnas que elegi dejar
     keep = [
         "obs_id", "is_test", "target",
@@ -123,7 +156,9 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         "audiobook_title", "audiobook_uri", "audiobook_chapter_uri", "audiobook_chapter_title",
         "track_freq_all",
         "platform", "conn_country", "ip_addr",
-        "shuffle", "offline", "incognito_mode",
+        "shuffle", "offline", "incognito_mode", 
+        #3 mas recientes ->
+        "user_skip_ratio", "artist_change", "track_skip_ratio"
     ]
     keep = [c for c in keep if c in df.columns]
     return df[keep].copy()
