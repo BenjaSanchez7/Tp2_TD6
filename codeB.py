@@ -84,16 +84,18 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
             df[b] = 0
 
 #Se cuenta cuantas veces aparece una cancion en el dataset y se guarda su "popularidad" en track_freq_all 
+    is_train = (df.get("is_test", 1) == 0)
+
     if "spotify_track_uri" in df.columns:
-        track_freq = df["spotify_track_uri"].value_counts().astype("int32")
-        df["track_freq_all"] = df["spotify_track_uri"].map(track_freq).fillna(0).astype("int32")
+        track_freq_tr = df.loc[is_train, "spotify_track_uri"].value_counts().astype("int32")
+        df["track_freq_all"] = df["spotify_track_uri"].map(track_freq_tr).fillna(0).astype("int32")
     else:
         df["track_freq_all"] = 0
 
 #Se cuenta cuantos eventos tiene c/usuario y se guarda su "actividad" en user_activity_all
     if "username" in df.columns:
-        user_cnt = df["username"].value_counts().astype("int32")
-        df["user_activity_all"] = df["username"].map(user_cnt).fillna(0).astype("int32")
+        user_cnt_tr = df.loc[is_train, "username"].value_counts().astype("int32")
+        df["user_activity_all"] = df["username"].map(user_cnt_tr).fillna(0).astype("int32")
     else:
         df["user_activity_all"] = 0
 
@@ -135,6 +137,61 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         df["user_skip_ratio"] = 0.0
 
 
+#Calculamos el ratio de skip de un track OOF
+        # === Track skip ratio OOF ===
+    if {"spotify_track_uri", "target", "is_test"}.issubset(df.columns):
+        from sklearn.model_selection import KFold
+
+        df["track_skip_ratio"] = np.nan
+
+        mask_trn = (df["is_test"] == 0) & df["target"].isin([0, 1])
+        idx_trn = np.where(mask_trn)[0]
+
+        # Out-of-fold con KFold (no uses GroupKFold acá porque agrupa por user,
+        # queremos promedios de track en general)
+        kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+        for tr_idx, va_idx in kf.split(idx_trn):
+            tr_ids = idx_trn[tr_idx]
+            va_ids = idx_trn[va_idx]
+
+            means = (
+                df.loc[tr_ids]
+                  .groupby("spotify_track_uri")["target"]
+                  .mean()
+            )
+            df.loc[va_ids, "track_skip_ratio"] = (
+                df.loc[va_ids, "spotify_track_uri"].map(means)
+            )
+
+        # Rellenar test + valores no vistos con promedio global
+        global_mean = float(df.loc[mask_trn, "target"].mean())
+        df["track_skip_ratio"] = (
+            df["track_skip_ratio"].fillna(global_mean).astype("float32")
+        )
+    else:
+        df["track_skip_ratio"] = 0.0
+
+
+
+#Si hay un cambio entre una cancion y otra pero sucedieron en distintas sesiones no lo considero skip
+    SESSION_GAP_SECONDS = 30 * 60  # 30 minutos
+
+    #Detectar nueva sesión por usuario (si hay un gap grande de tiempo respecto al evento anterior)
+    if {"username", "user_dt_prev"}.issubset(df.columns):
+        df["new_session"] = (df["user_dt_prev"] > SESSION_GAP_SECONDS).fillna(False).astype(int)
+    else:
+        df["new_session"] = 0
+
+    #Detectar cambio de tema respecto al evento anterior del mismo usuario
+    if {"username", "spotify_track_uri"}.issubset(df.columns):
+        prev_track = df.groupby("username", observed=True)["spotify_track_uri"].shift(1)
+        df["track_changed"] = (df["spotify_track_uri"] != prev_track).fillna(False).astype(int)
+    else:
+        df["track_changed"] = 0
+
+    #NO considerar "skip" si el cambio de tema ocurre entre sesiones
+    df["not_skip_session_change"] = ((df["new_session"] == 1) & (df["track_changed"] == 1)).astype(int)
 
 #Se arma una lista con las columnas utiles, el resto las ignoro y devuelvo una copia solo con las columnas que elegi dejar
     keep = [
@@ -150,6 +207,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         "shuffle", "offline", "incognito_mode", 
         #2 mas recientes ->
         "user_skip_ratio", "artist_change"
+        "new_session", "track_changed", "not_skip_session_change", "track_skip_ratio"
     ]
     keep = [c for c in keep if c in df.columns]
     return df[keep].copy()
@@ -208,6 +266,8 @@ def trainAndValidation(
     X_tst = X.loc[is_test_bool]
     y_trn = y[~is_test_bool.values]
 
+    pos_ratio = float(np.mean(y_trn))
+    auto_spw = ((1.0 - pos_ratio)/ max(pos_ratio, 1e-8)) if 0.0 <pos_ratio <1.0 else 1.0
 #Se definen hiperparametros base para XGBoost
     base_params = dict(
         max_depth=7,
@@ -223,6 +283,12 @@ def trainAndValidation(
     )
     if params:
         base_params.update(params)
+
+#Calculo el porcentaje de positivos en mi train y define scale_pos_weight para ver el desbalance del dataset
+    if "scale_pos_weight" not in base_params:
+        base_params["scale_pos_weight"] = auto_spw
+    print(f"[Info] pos_ratio={pos_ratio:.4f}  -> scale_pos_weight={base_params['scale_pos_weight']:.3f}")
+
 
 #Configura el GroupKFold y usa n_splits para no mezclar eventos del mismo usuario entre train y validacion
 #itera por folds y en cada uno crea X_tr, X_va, y_tr, y_va
@@ -246,22 +312,35 @@ def trainAndValidation(
         model = xgb.train(
             params=base_params,
             dtrain=dtrain,
-            num_boost_round=3000,
+            num_boost_round=5000,
             evals=watchlist,
-            early_stopping_rounds=100,
+            early_stopping_rounds=150,
             verbose_eval=False,
         )
 
-#Evalua el fold y acumula predicciones 
-        p_va = model.predict(dvalid)
+#Determina cuantos arboles usar (en caso de no haber early stopping usa todos)
+        best_it = model.best_iteration
+        use_range = None if best_it is None else (0, best_it+1)
+
+#Prediccion de OOF (out of fold) usando hasta best_iteration
+        if use_range is None:
+            p_va = model.predict(dvalid)
+        else:
+            p_va = model.predict(dvalid, iteration_range = use_range)
+    
         oof[va_idx] = p_va
         auc = roc_auc_score(y_va, p_va)
         fold_scores.append(auc)
         models.append(model)
 
-        print(f"[Fold {fold}] AUC = {auc:.5f}  best_ntree={model.best_iteration}")
+        print(f"[Fold {fold}] AUC = {auc:.5f}  best_iter={model.best_iteration}")
+    
+#Prediccion de TEST usando solo hasta best_iteration
 
-        test_pred += model.predict(dtest) / n_splits
+        if use_range is None:
+            test_pred += model.predict(dtest) / n_splits
+        else:
+            test_pred += model.predict(dtest, iteration_range = use_range) / n_splits
 
         del X_tr, y_tr, X_va, y_va, p_va
         gc.collect()
