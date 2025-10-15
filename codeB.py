@@ -206,7 +206,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         "platform", "conn_country", "ip_addr",
         "shuffle", "offline", "incognito_mode", 
         #2 mas recientes ->
-        "user_skip_ratio", "artist_change"
+        "user_skip_ratio", "artist_change",
         "new_session", "track_changed", "not_skip_session_change", "track_skip_ratio"
     ]
     keep = [c for c in keep if c in df.columns]
