@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 pd.set_option("display.max_columns", None)
 
 # Adjust this path if needed
-COMPETITION_PATH = ""
+COMPETITION_PATH =""
 
 
 def load_competition_datasets(data_dir, sample_frac=None, random_state=None):

@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations  # ← PRIMERA línea del archivo
+from __future__ import annotations  
 from typing import List, Tuple, Optional, Dict
 
 from dataclasses import dataclass
@@ -13,7 +12,7 @@ from sklearn.model_selection import GroupKFold, StratifiedKFold
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import OrdinalEncoder
 
-# StratifiedGroupKFold (si está disponible) con fallback a GroupKFold
+# StratifiedGroupKFold (si está) con fallback a GroupKFold
 try:
     from sklearn.model_selection import StratifiedGroupKFold
     HAS_SGF = True
@@ -35,26 +34,25 @@ class CFG:
     n_splits: int = 5
     early_stopping_rounds: int = 200
     num_boost_round: int = 5000
-    # ↓ Opcional: para ahorrar RAM quitamos columnas de texto crudo del keep
     DROP_TEXT_COLS: bool = True
 
 pd.set_option("display.max_columns", None)
 
 COMPETITION_PATH = ""
 
-#?----------------------------------------------------
-#? 1) CARGA DE DATA SETS
-#?----------------------------------------------------
+#----------------------------------------------------
+# 1) CARGA DE DATA SETS
+#----------------------------------------------------
 def loadData(data_dir: str):
     train = pd.read_csv(os.path.join(data_dir, "train_data.txt"), sep="\t", low_memory=False)
     test  = pd.read_csv(os.path.join(data_dir,  "test_data.txt"),  sep="\t", low_memory=False)
     return train, test
-#Se cargan ambos datasets (train y test) para posteriormente poder trabajar con ellos
+#Se cargan ambos datasets (train y test)
 
 
-#?----------------------------------------------------
-#? 2) CONCATENACION DE DATASETS Y TARGET
-#?----------------------------------------------------
+#----------------------------------------------------
+# 2) CONCATENACION DE DATASETS Y TARGET
+#----------------------------------------------------
 def unionAndTarget(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
 #Conversion de timestamps para que las variables temporales se manejen como fechas y evitar problemas 
     for df in (train, test):
@@ -81,11 +79,28 @@ def unionAndTarget(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# Helper TE OOF con smoothing
+#Helper TE OOF con smoothing
 def oof_target_encode(df: pd.DataFrame, col: str, target_col: str,
                       groups: Optional[pd.Series] = None,
                       n_splits: int = 5, alpha: float = 50.0,
                       random_state: int = 42) -> pd.Series:
+    """
+    Aplica codificación de variables categóricas (target encoding)
+    usando validación cruzada out-of-fold (OOF) y suavizado (smoothing).
+
+    Parametros:
+        df : dataframe que contiene la columna a codificar y el target
+        col : nombre de la columna categorica a codificar
+        target_col : nombre de la columna objetivo (0/1)
+        groups : grupos para GroupKFold (opcional)
+        n_splits : cantidad de folds para CV
+        alpha : parametro de suavizado (mayor = mas peso al promedio global)
+        random_state : semilla para reproducibilidad
+
+    Devuelve:
+        Serie con los valores codificados de la columna `col`
+    """
+    
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index, dtype="float32")
 
@@ -95,24 +110,26 @@ def oof_target_encode(df: pd.DataFrame, col: str, target_col: str,
 
     enc_oof = pd.Series(np.nan, index=df.index, dtype="float32")
 
-    # folds
+    #Definir estrategia de validación cruzada (GroupKFold o StratifiedKFold)
+
     if groups is not None:
         gkf = GroupKFold(n_splits=n_splits)
         split_iter = gkf.split(trn, y=trn[target_col], groups=groups[trn_mask])
     else:
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
         split_iter = skf.split(trn, y=trn[target_col])
-
+    #Entrenamiento y codificación OOF
     for tr_idx, va_idx in split_iter:
         tr_fold = trn.iloc[tr_idx]
         va_fold_idx = trn.iloc[va_idx].index
-
+        
+        # Calcular promedio suavizado del target por categoría
         stats = tr_fold.groupby(col, observed=True)[target_col].agg(["sum", "count"])
         enc_map = (stats["sum"] + alpha * global_mean) / (stats["count"] + alpha)
 
         enc_oof.loc[va_fold_idx] = df.loc[va_fold_idx, col].map(enc_map).fillna(global_mean).astype("float32")
 
-    # fit full train y asignar a TEST
+    #Codificar los datos de test usando todo el conjunto de entrenamiento
     stats_all = trn.groupby(col, observed=True)[target_col].agg(["sum", "count"])
     enc_map_all = (stats_all["sum"] + alpha * global_mean) / (stats_all["count"] + alpha)
     test_idx = df.index[df["is_test"] == 1]
@@ -121,9 +138,9 @@ def oof_target_encode(df: pd.DataFrame, col: str, target_col: str,
     return enc_oof
 
 
-#?----------------------------------------------------
-#? 3) INGENIERIA DE ATRIBUTOS BASICA
-#?----------------------------------------------------
+#----------------------------------------------------
+# 3) INGENIERIA DE ATRIBUTOS BASICA
+#----------------------------------------------------
 def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
 #Se ordenan los eventos por username y timestamp y se agrega un user_order para seguir el orden de interaccion de c/usuario con la app
     if {"username", "ts"}.issubset(df.columns):
@@ -132,7 +149,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["user_order"] = np.nan
 
-# A partir de ts se guarda la hora del dia, el dia de la semana y una flag que vale 1 si es sabado o domingo y 0 en caso contrario para capturar
+#A partir de ts se guarda la hora del dia, el dia de la semana y una flag que vale 1 si es sabado o domingo y 0 en caso contrario para capturar
 # patrones segun el dia y hora de la semana
     if "ts" in df.columns:
         df["hour"] = df["ts"].dt.hour.astype("Int64")
@@ -141,7 +158,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["hour"] = df["dow"] = df["is_weekend"] = np.nan
 
-# Para columnas booleanas, se transforman a enteros 0/1 (0 si no existen) para que sean comparables 
+#Para columnas booleanas, se transforman a enteros 0/1 (0 si no existen) para que sean comparables 
     for b in ["shuffle", "offline", "incognito_mode"]:
         if b in df.columns:
             df[b] = df[b].astype("Int64").fillna(0).astype(int)
@@ -165,7 +182,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         df["user_activity_all"] = 0
 
 #Se calcula para c/usuario cuanto duro su evento previo y su evento siguiente (en caso de existir) (se completa con -1 en caso de no existir) 
-#que sirve para ver la frecuencia de uso del usuario
+# que sirve para ver la frecuencia de uso del usuario
     if {"username", "ts"}.issubset(df.columns):
         df["user_dt_prev"] = (
             df.groupby("username", observed=True)["ts"].diff().dt.total_seconds().fillna(-1).astype("float32")
@@ -188,7 +205,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         df["artist_change"] = 0
 
 #Calculamos el ratio historico de skips por usuario
-#!Para evitar leakage se usan solo filas del train para calcular promedios
+#Para evitar leakage se usan solo filas del train para calcular promedios
     # Media acumulada de skip por usuario (no-leaky): solo TRAIN y hasta el evento anterior
     if {"username", "target", "is_test"}.issubset(df.columns):
         mask_trn_row = (df["is_test"] == 0) & df["target"].isin([0, 1])
@@ -214,7 +231,6 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         df["user_skip_cummean"] = 0.0
 
 #Calculamos el ratio de skip de un track OOF
-        # === Track skip ratio OOF ===
     if {"spotify_track_uri", "target", "is_test"}.issubset(df.columns):
         from sklearn.model_selection import KFold
 
@@ -222,11 +238,10 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
 
         mask_trn = (df["is_test"] == 0) & df["target"].isin([0, 1])
         idx_trn = np.where(mask_trn)[0]
-
-        # Out-of-fold con KFold (no uses GroupKFold acá porque agrupa por user,
-        # queremos promedios de track en general)
+    
         kf = KFold(n_splits=5, shuffle=True, random_state=42)
-
+            
+        # Para cada fold: media de skip por track en TR, asigno en VA
         for tr_idx, va_idx in kf.split(idx_trn):
             tr_ids = idx_trn[tr_idx]
             va_ids = idx_trn[va_idx]
@@ -240,7 +255,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
                 df.loc[va_ids, "spotify_track_uri"].map(means)
             )
 
-        # Rellenar test + valores no vistos con promedio global
+        #Imputo faltantes (TEST/no vistos) con media global de TRAIN
         global_mean = float(df.loc[mask_trn, "target"].mean())
         df["track_skip_ratio"] = (
             df["track_skip_ratio"].fillna(global_mean).astype("float32")
@@ -259,7 +274,7 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
 #Si hay un cambio entre una cancion y otra pero sucedieron en distintas sesiones no lo considero skip
     SESSION_GAP_SECONDS = 30 * 60  # 30 minutos
 
-    #Detectar nueva sesión por usuario (si hay un gap grande de tiempo respecto al evento anterior)
+    #Detecta nueva sesión si el gap con el evento previo supera el umbral
     if {"username", "user_dt_prev"}.issubset(df.columns):
         df["new_session"] = (df["user_dt_prev"] > SESSION_GAP_SECONDS).fillna(False).astype(int)
     else:
@@ -272,10 +287,10 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["track_changed"] = 0
 
-    #NO considerar "skip" si el cambio de tema ocurre entre sesiones
+    #No considerar skip si el cambio de tema ocurre entre sesiones
     df["not_skip_session_change"] = ((df["new_session"] == 1) & (df["track_changed"] == 1)).astype(int)
 
-    # Identificador de sesión y posición/longitud dentro de la sesión
+    #Identificador de sesión y posición/longitud dentro de la sesión
     if {"username", "new_session"}.issubset(df.columns):
         df["session_id"] = df.groupby("username", observed=True)["new_session"].cumsum().astype("int32")
         df["pos_in_session"] = df.groupby(["username", "session_id"], observed=True).cumcount().astype("int32")
@@ -294,12 +309,12 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
             df.groupby("username", observed=True)["target"].shift(1).fillna(0).astype("int8")
         )
 
-        # rolling de 5 eventos previos (shift para no ver el actual)
+        #Rolling de 5 eventos previos (shift para no ver el actual)
         tmp = (
             df.groupby("username", observed=True)["target"]
             .apply(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
         )
-        # alinear índice (evita MultiIndex)
+        #Alinear índice (evita MultiIndex)
         tmp.index = df.index
         df["user_skip_roll5"] = tmp.fillna(0.0).astype("float32")
     else:
@@ -318,13 +333,11 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         "track_freq_all",
         "platform", "conn_country", "ip_addr",
         "shuffle", "offline", "incognito_mode", 
-        #2 mas recientes ->
         "user_skip_cummean", "artist_change",
         "new_session", "track_changed", "not_skip_session_change", "track_skip_ratio",
         "session_id", "pos_in_session", "session_len",
         "prev_target", "user_skip_roll5"
     ]
-    # Opcional: para ahorrar RAM, remover columnas de texto crudo (ya tenemos *_te si hicimos TE)
     if CFG.DROP_TEXT_COLS:
         drop_text = {
             "master_metadata_track_name",
@@ -336,42 +349,44 @@ def ingAtributos(df: pd.DataFrame) -> pd.DataFrame:
         }
         keep = [c for c in keep if c not in drop_text]
 
-    # quedate solo con las que existan
+    #Mantengo solo las existentes
     keep = [c for c in keep if c in df.columns]
 
-    # sumar dinámicamente los target encodings OOF si existen (p.ej. platform_te, master_metadata_album_artist_name_te)
+    #Sumar dinamicamente los target encodings OOF si existen (p.ej. platform_te, master_metadata_album_artist_name_te)
     te_cols = [c for c in df.columns if c.endswith("_te")]
     keep = keep + te_cols
 
-    # === Compactar dtypes ANTES de devolver para bajar memoria ===
+
     float_cols = df.select_dtypes(include=["float64"]).columns.tolist()
     if float_cols:
         df[float_cols] = df[float_cols].astype("float32")
 
     int64_cols = df.select_dtypes(include=["int64"]).columns.tolist()
-    preserve_int64 = {"obs_id"}  # mantener IDs largos si querés
+    preserve_int64 = {"obs_id"}  
     to_int32 = [c for c in int64_cols if c not in preserve_int64]
     if to_int32:
         df[to_int32] = df[to_int32].astype("int32")
 
-    # Devolver SIN copia profunda para evitar consolidación costosa de bloques
     return df.loc[:, keep].reset_index(drop=True)
 
 
-#?----------------------------------------------------
-#? 4) ENCODING VARIABLES CATEGORICAS
-#?----------------------------------------------------
+#----------------------------------------------------
+# 4) ENCODING VARIABLES CATEGORICAS
+#----------------------------------------------------
 def encodeCategoricas(df: pd.DataFrame):
+    # Flags y target (los usamos después para entrenar/validar)
     is_test = df["is_test"].to_numpy()
     y = df["target"].to_numpy()
 
     X = df.drop(columns=["is_test", "target", "obs_id", "username"], errors="ignore")
 
+    #Separación de tipos: categóricas vs numéricas
     cat_cols = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype) == "string"]
     num_cols = [c for c in X.columns if c not in cat_cols]
 
     encoder = None
     if len(cat_cols) > 0:
+        #OrdinalEncoder con manejo de desconocidos y nulos
         encoder = OrdinalEncoder(
             handle_unknown="use_encoded_value",
             unknown_value=-1,
@@ -379,36 +394,39 @@ def encodeCategoricas(df: pd.DataFrame):
         )
         trn_mask = (df["is_test"] == 0)
 
-        # fit SOLO con train
+        #Hago fit solo con train
         encoder.fit(X.loc[trn_mask, cat_cols])
 
-        # transform train y test por separado para evitar reindex raros
+        #Transform train y test por separado
         X_cat_tr = encoder.transform(X.loc[trn_mask, cat_cols])
         X_cat_te = encoder.transform(X.loc[~trn_mask, cat_cols])
 
+        #Vuelvo a dataframe con mismo indice/columnas
         X_cat_tr = pd.DataFrame(X_cat_tr, columns=cat_cols, index=X.loc[trn_mask].index)
         X_cat_te = pd.DataFrame(X_cat_te, columns=cat_cols, index=X.loc[~trn_mask].index)
 
         X_cat = pd.concat([X_cat_tr, X_cat_te], axis=0).sort_index()
         X = pd.concat([X[num_cols], X_cat], axis=1)
 
+    #Nombres finales de features
     feature_names = X.columns.tolist()
+
     return X, y, is_test, feature_names, encoder
 
 
-#?----------------------------------------------------
-#? 5) TRAINING Y VALIDATION
-#?----------------------------------------------------
+#----------------------------------------------------
+# 5) TRAINING Y VALIDATION
+#----------------------------------------------------
 def trainAndValidation(
     df: pd.DataFrame,
     feature_names: List[str],
-    groups: pd.Series,  # se ignora; se reconstruye adentro a partir de df
+    groups: pd.Series,  #Se ignora, se reconstruye adentro a partir de df
     n_splits: int = 5,
     params: Optional[Dict] = None,
     seeds: List[int] = (42,),
 ) -> Tuple[np.ndarray, np.ndarray]:
     
-    # máscaras
+    #Separar TRAIN y TEST usando la columna is_test
     trn_idx = df["is_test"].values == 0
     tst_idx = ~trn_idx
 
@@ -417,7 +435,7 @@ def trainAndValidation(
     y = df.loc[trn_idx, "target"].to_numpy().astype(np.int32)
     X_test = df.loc[tst_idx, feature_names].to_numpy()
 
-    # === construir groups SOLO para TRAIN (alineado 1–a–1 con X, y), factorizar ===
+    #Grupos para CV (por usuario si existe, o por obs_id como fallback)
     if "username" in df.columns:
         groups_trn = pd.factorize(
             df.loc[trn_idx, "username"].astype(str).fillna("unknown")
@@ -427,15 +445,15 @@ def trainAndValidation(
             df.loc[trn_idx, "obs_id"].astype(str).fillna("unknown")
         )[0]
 
-    # sanity check
+    #Chequeo de consistencia
     assert len(groups_trn) == len(y), f"len(groups_trn)={len(groups_trn)} != len(y)={len(y)}"
 
-    # desbalance
+    #Calculo el desbalance de clases (para scale_pos_weight)
     pos = y.sum()
     neg = len(y) - pos
     scale_pos_weight = float(neg / max(pos, 1))
 
-    # params base
+    #Parametros base del modelo XGBoost
     base_params = dict(
         objective="binary:logistic",
         eval_metric="auc",
@@ -451,16 +469,19 @@ def trainAndValidation(
         scale_pos_weight=scale_pos_weight,
         verbosity=0,
     )
+    #Si se pasan params externos, los sobreescribo
     if params:
         base_params.update(params)
 
+    #Inicializo arrays para predicciones
     oof = np.zeros(len(y), dtype=np.float32)
     test_pred_bag = np.zeros((len(X_test), len(seeds)), dtype=np.float32)
-
+    
+    # Entrenamiento repetido para cada semilla (bagging)
     for s_idx, seed in enumerate(seeds):
         base_params["seed"] = seed
 
-        # splitter (StratifiedGroupKFold si está; si no, GroupKFold)
+        #Splitter (StratifiedGroupKFold si esta, si no, GroupKFold)
         if HAS_SGF:
             splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
             split_iter = splitter.split(X, y, groups=groups_trn)
@@ -470,14 +491,17 @@ def trainAndValidation(
 
         fold_preds = np.zeros(len(X_test), dtype=np.float32)
 
+        # Entrenar un modelo por fold
         for fold, (tr_idx, va_idx) in enumerate(split_iter):
             X_tr, X_va = X[tr_idx], X[va_idx]
             y_tr, y_va = y[tr_idx], y[va_idx]
-
+            
+            #Armo los DMatrix de XGBoost
             dtr = xgb.DMatrix(X_tr, label=y_tr, feature_names=feature_names)
             dva = xgb.DMatrix(X_va, label=y_va, feature_names=feature_names)
             dte = xgb.DMatrix(X_test, feature_names=feature_names)
 
+            #Entrenamiento con early stopping
             bst = xgb.train(
                 params=base_params,
                 dtrain=dtr,
@@ -487,44 +511,57 @@ def trainAndValidation(
                 verbose_eval=False,
             )
 
+            #Predicciones en validación (OOF)
             va_pred = bst.predict(dva, iteration_range=(0, bst.best_iteration + 1))
             oof[va_idx] = (oof[va_idx] + va_pred) if s_idx > 0 else va_pred
 
+            #Predicciones en test
             fold_pred = bst.predict(dte, iteration_range=(0, bst.best_iteration + 1))
             fold_preds += fold_pred
 
+            #Metrica del fold (AUC)
             auc = roc_auc_score(y_va, va_pred)
             print(f"[seed {seed}] Fold {fold+1}/{n_splits} AUC = {auc:.5f} | best_iter = {bst.best_iteration}")
 
             del dtr, dva
             gc.collect()
 
+         #Promedio de predicciones del TEST entre folds
         fold_preds /= n_splits
         test_pred_bag[:, s_idx] = fold_preds
 
+    #Promedio final del TEST entre semillas
     test_pred = test_pred_bag.mean(axis=1)
+
+    #Promedio de OOF si hubo más de una semilla
     if len(seeds) > 1:
         oof /= len(seeds)
 
+    #Metrica global OOF
     overall_auc = roc_auc_score(y, oof)
     print(f"OOF AUC: {overall_auc:.5f}")
 
+    #Devuelve predicciones OOF (TRAIN) y TEST final promedio
     return oof, test_pred
 
 
-#?----------------------------------------------------
-#? 6) PIPELINE
-#?----------------------------------------------------
+#----------------------------------------------------
+# 6) PIPELINE
+#----------------------------------------------------
 def main():
     print("=== TP2 XGBoost baseline ===")
+
+    #Cargar datos y unir TRAIN + TEST
     train, test = loadData(COMPETITION_PATH)
     df = unionAndTarget(train, test)
+
+    #Generar atributos derivados
     df = ingAtributos(df)
 
-    # 1) encode
+    #Codificar columnas categoricas
     X, y, is_test, feature_names, _ = encodeCategoricas(df)
 
-    # 2) reconstruir un df "encodeado" con las columnas que usa trainAndValidation
+    #Reconstruir dataframe encodeado para el modelo
     X_df = pd.DataFrame(X, columns=feature_names, index=df.index)
     df_enc = pd.concat(
         [df[["obs_id", "is_test", "target", "username"]].reset_index(drop=True),
@@ -532,22 +569,22 @@ def main():
         axis=1
     )
 
-    # 3) llamar a trainAndValidation con df_enc (no pases X, y, is_test)
+    #Entrenar modelo y obtener predicciones OOF y TEST
     oof, test_pred = trainAndValidation(
         df=df_enc,
         feature_names=feature_names,
-        groups=df_enc["username"],     # se reconstruye adentro con seguridad
+        groups=df_enc["username"],
         n_splits=CFG.n_splits,
         params=None,
         seeds=[42],
     )
 
-    # AUC OOF antes del submit
+    #Calcular AUC OOF (evaluación interna)
     mask_trn = (df_enc["is_test"] == 0)
     auc_oof = roc_auc_score(df_enc.loc[mask_trn, "target"].astype(int), oof)
     print(f"AUC OOF: {auc_oof:.5f}")
 
-    # Submit
+    #Generar archivo de submit
     obs_id_test = df_enc.loc[df_enc["is_test"] == 1, "obs_id"].to_numpy()
     sub = pd.DataFrame({"obs_id": obs_id_test, "pred_proba": test_pred})
     sub.to_csv("submission_xgb2.csv", index=False)
